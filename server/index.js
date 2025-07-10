@@ -2879,8 +2879,6 @@ app.get('/api/stats/client-vms/:clientId', authenticate, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed to retrieve VMs for the client.' }); }
 });
 
-
-
 // --- Servidor HTTP para Express y WebSocket ---
 const server = http.createServer(app); // O https.createServer(options, app) si usas HTTPS
 
