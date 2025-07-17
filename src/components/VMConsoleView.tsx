@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
+import VNC from '@novnc/novnc/core/rfb.js'; // Correct import for the VNC client
 
 // Define types here as they are imported from this file by StandaloneConsolePage.tsx
 // and potentially VMDetails.tsx.
@@ -9,6 +10,7 @@ export interface ProxmoxConnectionDetails {
   node: string;
   vmid: number | string;
   ticket: string;
+  vncPort?: number | string;
   // ssl?: boolean; // Optional: to determine http vs https, though Proxmox typically uses https
 }
 
@@ -53,86 +55,103 @@ interface VMConsoleViewProps {
 
 const VMConsoleView: React.FC<VMConsoleViewProps> = ({ consoleDetails, onClose, onError }) => {
   const [selectedOption, setSelectedOption] = useState<ConsoleOption | null>(null);
-  const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
+  const screenRef = useRef<HTMLDivElement>(null);
+  const vncRef = useRef<VNC | null>(null);
 
   useEffect(() => {
+    // Find the best console option to use
     if (consoleDetails && consoleDetails.consoleOptions && consoleDetails.consoleOptions.length > 0) {
-      // Prioritize Proxmox, then vSphere HTML5, then first available.
-      let optionToUse = consoleDetails.consoleOptions.find(opt => opt.type === 'proxmox');
-
-      if (!optionToUse) {
-        optionToUse = consoleDetails.consoleOptions.find(opt => opt.type === 'vsphere_html5' && (opt.connectionDetails as VSphereHtml5ConnectionDetails)?.url);
-      }
-      if (!optionToUse && consoleDetails.consoleOptions.length > 0) {
-        // Fallback to the first option if no preferred type is found yet
-        // This part might need more sophisticated logic if the first option isn't directly usable
-        // optionToUse = consoleDetails.consoleOptions[0];
-      }
-
-      if (optionToUse) {
-        setSelectedOption(optionToUse);
-        try {
-          if (optionToUse.type === 'proxmox') {
-            const details = optionToUse.connectionDetails as ProxmoxConnectionDetails;
-            // Log the ticket for debugging to see what value is being received
-            console.log("VMConsoleView: Proxmox ticket received by frontend:", details.ticket);
-            if (!details.host || !details.port || !details.node || !details.vmid || !details.ticket || typeof details.ticket !== 'string' || details.ticket.trim() === '') {
-              const errorMessage = `Incomplete or invalid Proxmox connection details. Host: ${details.host}, Port: ${details.port}, Node: ${details.node}, VMID: ${details.vmid}, Ticket: '${details.ticket}' (Type: ${typeof details.ticket})`;
-              onError(errorMessage);
-              throw new Error(errorMessage);
-            }
-
-            const protocol = (Number(details.port) === 443 || Number(details.port) === 8006 || String(details.port).includes('443') || String(details.port).includes('8006')) ? 'https' : 'http';
-            const encodedTicket = encodeURIComponent(details.ticket);
-            // URL estándar de noVNC para Proxmox. El manejador noVNC del servidor Proxmox utiliza el ticket, node y vmid
-            // para establecer internamente la conexión WebSocket al puerto vncproxy correcto.
-            const url = `${protocol}://${details.host}:${details.port}/?console=kvm&novnc=1&vmid=${details.vmid}&node=${details.node}&ticket=${encodedTicket}&resize=scale`;
-            setConsoleUrl(url);
-          } else if (optionToUse.type === 'vsphere_html5') {
-            const details = optionToUse.connectionDetails as VSphereHtml5ConnectionDetails;
-            if (!details.url) {
-              throw new Error("vSphere HTML5 console URL is missing.");
-            }
-            setConsoleUrl(details.url);
-          } else {
-            // Handle other types or prepare for them
-            onError(`Console type '${optionToUse.type}' is recognized but not yet fully renderable in this view.`);
-            setConsoleUrl(null); // No direct URL for these yet
-          }
-        } catch (e: any) {
-          onError(`Error processing console details for type '${optionToUse.type}': ${e.message}`);
-          setConsoleUrl(null);
-        }
-      } else {
-        onError(`No supported console option found. Available types: ${consoleDetails.consoleOptions.map(o => o.type).join(', ')}`);
-        setConsoleUrl(null);
-      }
+      const proxmoxOption = consoleDetails.consoleOptions.find(opt => opt.type === 'proxmox');
+      // Add logic for other types if needed
+      setSelectedOption(proxmoxOption || consoleDetails.consoleOptions[0]);
+      console.log("Selected console option:", proxmoxOption || consoleDetails.consoleOptions[0]);
     } else {
       onError("No console options available in consoleDetails.");
-      setConsoleUrl(null);
     }
+
+    // Cleanup on unmount
+    return () => {
+      if (vncRef.current) {
+        vncRef.current.disconnect();
+        vncRef.current = null;
+      }
+    };
   }, [consoleDetails, onError]);
+
+  useEffect(() => {
+    if (selectedOption && selectedOption.type === 'proxmox' && screenRef.current) {
+      // Disconnect previous instance if any
+      if (vncRef.current) {
+        vncRef.current.disconnect();
+      }
+
+      const details = selectedOption.connectionDetails as ProxmoxConnectionDetails;
+      if (!details.vmid || !details.node) {
+          onError("VM ID or Node is missing in Proxmox connection details.");
+          return;
+      }
+
+      // Construct the WebSocket URL to *your* backend proxy
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host; // Connect to the same host as the web app
+      // Include ticket and vncPort in the WebSocket URL query parameters
+      const ticketParam = encodeURIComponent((details.ticket || '').toString());
+      const vncPortParam = encodeURIComponent((details.vncPort || '').toString());
+      const proxyUrl = `${proto}//${host}/api/ws/proxmox-console?vmid=${details.vmid}&node=${details.node}&ticket=${ticketParam}&vncPort=${vncPortParam}`;
+
+      console.log(`Connecting to backend WebSocket proxy: ${proxyUrl}`);
+
+      try {
+        const rfb = new VNC(screenRef.current, proxyUrl, {
+            // The backend proxy will handle credentials (PVEAuthCookie and the VNC ticket)
+            // We don't pass them from the client here.
+        });
+        vncRef.current = rfb;
+
+        rfb.addEventListener('disconnect', (event: any) => {
+            console.log('noVNC disconnected:', event.detail);
+            if (!event.detail.clean) {
+                onError('Console disconnected unexpectedly. Please try again.');
+            }
+        });
+
+      } catch (e: any) {
+        onError(`Failed to initialize noVNC client: ${e.message}`);
+      }
+    }
+    // Handle other console types like vsphere_html5 (which might still use an iframe)
+    else if (selectedOption && selectedOption.type === 'vsphere_html5') {
+        // The iframe logic for vSphere HTML5 can remain if it works
+    }
+
+  }, [selectedOption, onError]);
 
   const renderConsoleContent = () => {
     if (!selectedOption) {
       return <div className="p-4 text-center">Loading console or no option selected...</div>;
     }
-    if (!consoleUrl && (selectedOption.type === 'proxmox' || selectedOption.type === 'vsphere_html5')) {
-        return <div className="p-4 text-center">Preparing console URL... If this persists, an error might have occurred.</div>;
+
+    if (selectedOption.type === 'proxmox') {
+      // This div is the target for the noVNC canvas
+      return <div ref={screenRef} className="w-full h-full" />;
     }
 
-    if ((selectedOption.type === 'proxmox' || selectedOption.type === 'vsphere_html5') && consoleUrl) {
-      return (
-        <iframe
-          src={consoleUrl}
-          title={`${consoleDetails.vmName} Console (${selectedOption.name || selectedOption.type})`}
-          className="w-full h-full border-0"
-          allowFullScreen
-        />
-      );
+    if (selectedOption.type === 'vsphere_html5') {
+      const details = selectedOption.connectionDetails as VSphereHtml5ConnectionDetails;
+      if (details.url) {
+        return (
+          <iframe
+            src={details.url}
+            title={`${consoleDetails.vmName} Console (${selectedOption.name || selectedOption.type})`}
+            className="w-full h-full border-0"
+            allowFullScreen
+          />
+        );
+      }
     }
-    // Placeholder for other console types like WebMKS which require SDKs
-    return <div className="p-4 text-center">Console type '{selectedOption.type}' is not yet renderable with a direct URL. Further implementation needed.</div>;
+
+    // Fallback for unimplemented types
+    return <div className="p-4 text-center">Console type '{selectedOption.type}' is not yet renderable with this method.</div>;
   };
 
   return (
