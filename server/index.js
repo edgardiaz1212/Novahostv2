@@ -869,17 +869,15 @@ app.post('/api/vms/:id/action', authenticate, async (req, res) => {
 
 // POST /api/vms/:id/console - Get console access details
 app.post('/api/vms/:id/console', authenticate, async (req, res) => {
-  const { id: vmExternalId } = req.params; // Proxmox vmid or vSphere UUID
+  const { id: vmExternalId } = req.params;
   console.log(`--- Received POST /api/vms/${vmExternalId}/console ---`);
 
   let targetHypervisor = null;
-  let targetNode = null; // For Proxmox
+  let targetNode = null;
   let proxmoxClientInstance = null;
-  let vmNameForConsole = vmExternalId; // Default name
+  let vmNameForConsole = vmExternalId;
 
   try {
-    // Step 1: Find the VM's Hypervisor and basic info
-    // Similar logic to /action or /details route to find the VM
     const { rows: connectedHypervisors } = await pool.query(
       `SELECT id, type, host, username, api_token, password, token_name, name as hypervisor_name 
        FROM hypervisors WHERE status = 'connected'`
@@ -891,18 +889,24 @@ app.post('/api/vms/:id/console', authenticate, async (req, res) => {
       if (hypervisor.type === 'proxmox') {
         const [dbHost, dbPortStr] = hypervisor.host.split(':');
         const port = dbPortStr ? parseInt(dbPortStr, 10) : 8006;
-        const cleanHost = dbHost; // This is the Proxmox API host
-        const proxmoxConfig = {
-          host: cleanHost, port: port, username: hypervisor.username,
-          tokenID: `${hypervisor.username}!${hypervisor.token_name}`,
-          tokenSecret: hypervisor.api_token, timeout: 10000, rejectUnauthorized: false
-        };
+        const cleanHost = dbHost;
         
-console.log("proxmoxConfig",proxmoxConfig)
+        const proxmoxConfig = {
+          host: cleanHost, 
+          port: port, 
+          username: hypervisor.username,
+          tokenID: `${hypervisor.username}!${hypervisor.token_name}`,
+          tokenSecret: hypervisor.api_token, 
+          timeout: 10000, 
+          rejectUnauthorized: false
+        };
+
         proxmoxClientInstance = proxmoxApi(proxmoxConfig);
+        
         try {
           const vmResources = await proxmoxClientInstance.cluster.resources.$get({ type: 'vm' });
           const foundVm = vmResources.find(vm => vm.vmid.toString() === vmExternalId);
+          
           if (foundVm) {
             targetHypervisor = hypervisor;
             targetNode = foundVm.node;
@@ -914,79 +918,176 @@ console.log("proxmoxConfig",proxmoxConfig)
         } catch (findError) {
           console.warn(`Console: Could not check Proxmox hypervisor ${hypervisor.id} for VM ${vmExternalId}:`, findError.message);
         }
-      } else if (hypervisor.type === 'vsphere') {
-        // For vSphere, we assume vmExternalId is the UUID. The PyVmomi service will confirm.
-        // We need to fetch the VM name if possible for a better console title.
-        // A quick DB lookup:
-        const { rows: [dbVm] } = await pool.query('SELECT name FROM virtual_machines WHERE hypervisor_vm_id = $1 AND hypervisor_id = $2', [vmExternalId, hypervisor.id]);
-        if (dbVm) {
-            vmNameForConsole = dbVm.name;
-        }
-        // Basic UUID check to ensure it's likely a vSphere VM before trying
-        if (vmExternalId.length === 36 && vmExternalId.includes('-')) {
-          targetHypervisor = hypervisor;
-          vmFoundOnHypervisor = true; // Assume we'll try with this hypervisor
-          console.log(`Console: Assuming VM ${vmExternalId} is vSphere on hypervisor ${hypervisor.id}. Name: ${vmNameForConsole}`);
-          break;
-        }
       }
     }
 
     if (!vmFoundOnHypervisor || !targetHypervisor) {
-      return res.status(404).json({ error: `VM ${vmExternalId} not found on any suitable connected hypervisor for console access.` });
+      return res.status(404).json({ 
+        error: `VM ${vmExternalId} not found on any suitable connected hypervisor for console access.` 
+      });
     }
 
-    // Step 2: Get console details based on hypervisor type
-    if (targetHypervisor.type === 'proxmox') {
-      console.log(`Console: Requesting VNC proxy for Proxmox VM ${vmExternalId} on node ${targetNode}`);
-      const vncProxyResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncproxy.$post({});
-      // targetHypervisor.host from DB is like "10.70.255.84:8006"
-      const [apiHost, apiPortStr] = targetHypervisor.host.split(':');
-      const proxmoxApiPort = apiPortStr ? parseInt(apiPortStr, 10) : 8006;
+    // Obtener ticket VNC de Proxmox
+    console.log(`Console: Requesting VNC proxy for Proxmox VM ${vmExternalId} on node ${targetNode}`);
+    
+    // CORRECCIÓN: Obtener ticket primero desde vncproxy usando POST en lugar de GET
+    const vncProxyResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncproxy.$post();
 
-      // vncProxyResponse.port is the actual VNC port (e.g., 5900)
-      // vncProxyResponse.ticket is the VNC ticket
-      console.log(`Proxmox vncproxy obtained: vncPort=${vncProxyResponse.port}, ticket=${vncProxyResponse.ticket ? 'present' : 'missing'}. Proxmox API for connection: ${apiHost}:${proxmoxApiPort}, Node: ${targetNode}`);
+    if (!vncProxyResponse.ticket) {
+      console.error(`Proxmox vncproxy response missing ticket for VM ${vmExternalId}`);
+      throw new Error('Proxmox vncproxy response missing ticket');
+    }
 
-      if (!vncProxyResponse.port || !vncProxyResponse.ticket) {
-        console.error(`Proxmox vncproxy response for VM ${vmExternalId} on node ${targetNode} is missing port or ticket.`);
-        throw new Error('Proxmox vncproxy response was incomplete (missing port or ticket).');
+    // Ahora llamar a vncwebsocket con vncticket
+    const vncWebsocketResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncwebsocket.$get({
+      port: 5900, // Puerto VNC por defecto
+      vncticket: vncProxyResponse.ticket
+    });
+
+    const [apiHost] = targetHypervisor.host.split(':');
+    const proxmoxApiPort = 8006; // Puerto por defecto de Proxmox
+
+    console.log(`Proxmox VNC WebSocket obtained:`, {
+      port: vncWebsocketResponse.port,
+      ticket: vncProxyResponse.ticket ? 'present' : 'missing'
+    });
+
+    if (!vncWebsocketResponse.port || !vncProxyResponse.ticket) {
+      console.error(`Proxmox vncwebsocket response incomplete for VM ${vmExternalId}`);
+      throw new Error('Proxmox vncwebsocket response was incomplete');
+    }
+
+    // Guardar temporalmente el ticket para validación posterior
+    const consoleSession = {
+      vmid: vmExternalId,
+      node: targetNode,
+      host: apiHost,
+      port: vncProxyResponse.port,
+      ticket: vncProxyResponse.ticket,
+      timestamp: Date.now()
+    };
+
+    // Usar un cache temporal (puedes usar Redis en producción)
+    global.consoleSessions = global.consoleSessions || new Map();
+    const sessionId = `${vmExternalId}-${targetNode}-${Date.now()}`;
+    global.consoleSessions.set(sessionId, consoleSession);
+
+    // Limpiar sesiones antiguas (más de 10 minutos)
+    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+    for (const [key, session] of global.consoleSessions.entries()) {
+      if (session.timestamp < tenMinutesAgo) {
+        global.consoleSessions.delete(key);
       }
- 
-
-      res.json({
-        type: 'proxmox',
-        connectionDetails: {
-          host: apiHost, // Proxmox API host (e.g., 10.70.255.84)
-          port: proxmoxApiPort, // Proxmox API port (e.g., 8006)
-          ticket: vncProxyResponse.ticket, // This is the password for VNC
-          vmid: vmExternalId,
-          node: targetNode,
-          vmName: vmNameForConsole,
-          vncPort: vncProxyResponse.port // Actual VNC port from vncproxy (e.g., 5900)
-
-
-        }
-      });
-    } else if (targetHypervisor.type === 'vsphere') {
-      console.log(`Console: Requesting WebMKS ticket for vSphere VM ${vmExternalId} via PyVmomi`);
-      const mksTicketDetails = await callPyvmomiService('POST', `/vm/${vmExternalId}/console`, targetHypervisor, { vm_name: vmNameForConsole });
-         // PyVmomi service now returns ticket_type ('mks' or 'webmks') and corresponding details.
-      // The frontend will use ticket_type to determine how to connect.
-      res.json({
-        type: `vsphere_${mksTicketDetails.ticket_type}`, // e.g., vsphere_mks or vsphere_webmks
-        connectionDetails: { 
-          ...mksTicketDetails, // Pass all details from PyVmomi
-          vmName: vmNameForConsole 
-        }
-      });
     }
+
+    res.json({
+      type: 'proxmox',
+      sessionId,
+      connectionDetails: {
+        host: apiHost,
+        port: proxmoxApiPort,
+        vmid: vmExternalId,
+        node: targetNode,
+        vmName: vmNameForConsole,
+        vncPort: vncProxyResponse.port
+        // No enviamos el ticket al frontend por seguridad
+      }
+    });
+
   } catch (error) {
     console.error(`Error getting console for VM ${vmExternalId}:`, error);
-    const errorDetails = getProxmoxError(error); // Adapt if error is from PyVmomi
-    res.status(errorDetails.code || 500).json({ error: 'Failed to get console access.', details: errorDetails.message });
+    const errorDetails = getProxmoxError(error);
+    res.status(errorDetails.code || 500).json({ 
+      error: 'Failed to get console access.', 
+      details: errorDetails.message 
+    });
   }
 });
+
+app.get('/api/debug/console/:vmid', authenticate, async (req, res) => {
+  const { vmid } = req.params;
+  
+  try {
+    // Verificar si la VM existe en la base de datos
+    const { rows: vmRows } = await pool.query(
+      'SELECT * FROM virtual_machines WHERE hypervisor_vm_id = $1',
+      [vmid]
+    );
+    
+    console.log(`Debug: VM ${vmid} in DB:`, vmRows.length > 0);
+    
+    if (vmRows.length === 0) {
+      return res.json({
+        vmInDatabase: false,
+        message: 'VM not found in database'
+      });
+    }
+    
+    const vm = vmRows[0];
+    
+    // Obtener información del hypervisor
+    const { rows: hypervisorRows } = await pool.query(
+      'SELECT * FROM hypervisors WHERE id = $1',
+      [vm.hypervisor_id]
+    );
+    
+    if (hypervisorRows.length === 0) {
+      return res.json({
+        vmInDatabase: true,
+        hypervisorFound: false,
+        message: 'Hypervisor not found'
+      });
+    }
+    
+    const hypervisor = hypervisorRows[0];
+    
+    // Intentar conectar a Proxmox
+    const [dbHost] = hypervisor.host.split(':');
+    const proxmoxConfig = {
+      host: dbHost,
+      port: 8006,
+      username: hypervisor.username,
+      tokenID: `${hypervisor.username}!${hypervisor.token_name}`,
+      tokenSecret: hypervisor.api_token,
+      timeout: 5000,
+      rejectUnauthorized: false
+    };
+    
+    try {
+      const proxmoxClient = proxmoxApi(proxmoxConfig);
+      const vmResources = await proxmoxClient.cluster.resources.$get({ type: 'vm' });
+      const foundVm = vmResources.find(vm => vm.vmid.toString() === vmid);
+      
+      res.json({
+        vmInDatabase: true,
+        hypervisorFound: true,
+        hypervisorConnected: true,
+        vmFoundInProxmox: !!foundVm,
+        vmDetails: foundVm || null,
+        hypervisorHost: dbHost,
+        hypervisorStatus: hypervisor.status
+      });
+      
+    } catch (proxmoxError) {
+      res.json({
+        vmInDatabase: true,
+        hypervisorFound: true,
+        hypervisorConnected: false,
+        proxmoxError: proxmoxError.message,
+        hypervisorHost: dbHost,
+        hypervisorStatus: hypervisor.status
+      });
+    }
+    
+  } catch (error) {
+    console.error('Debug endpoint error:', error);
+    res.status(500).json({
+      error: 'Debug endpoint failed',
+      message: error.message
+    });
+  }
+});
+
 
 // Helper function to extract IP addresses from Proxmox QEMU agent response
 function extractIpAddressesFromAgent(agentInterfaces) {
@@ -2886,28 +2987,25 @@ const wss = new WebSocketServer({ noServer: true });
 
 // --- WebSocket Proxy para noVNC ---
 server.on('upgrade', (request, socket, head) => {
-  const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
-  const pathname = parsedUrl.pathname;
-  const token = parsedUrl.searchParams.get('token');
+  try {
+    const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
+    const pathname = parsedUrl.pathname;
+    
+    console.log(`WebSocket Upgrade Request: Path=${pathname}`);
 
-  console.log(`WebSocket Upgrade Request: Path=${pathname}, Token=${token ? 'present' : 'missing'}`);
-
-  // Validar el token aquí si es necesario para la seguridad del proxy
-  // Por ejemplo, podrías tener un sistema de tokens de un solo uso generados por la API
-
-  if (pathname.startsWith('/websockify')) {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  } else if (pathname.startsWith('/api/ws/proxmox-console')) {
-    console.log(`[WebSocket Upgrade] Path matches '/api/ws/proxmox-console'. Attempting to handle upgrade.`);
-    // Authentication layer can be added here if needed
-    wss.handleUpgrade(request, socket, head, (wsClient) => {
-      console.log('[WebSocket Upgrade] wss.handleUpgrade successful. Emitting "connection" event to wss.');
-      wss.emit('connection', wsClient, request);
-    });
-  } else {
-    console.log('WebSocket upgrade request for unknown path, destroying socket.');
+    if (pathname.startsWith('/api/ws/proxmox-console')) {
+      console.log('[WebSocket Upgrade] Handling Proxmox console upgrade');
+      
+      wss.handleUpgrade(request, socket, head, (wsClient) => {
+        console.log('[WebSocket Upgrade] Successfully handled upgrade');
+        wss.emit('connection', wsClient, request);
+      });
+    } else {
+      console.log(`WebSocket upgrade request for unknown path: ${pathname}`);
+      socket.destroy();
+    }
+  } catch (error) {
+    console.error('Error in WebSocket upgrade handler:', error);
     socket.destroy();
   }
 });
@@ -2916,209 +3014,125 @@ server.listen(port, () => {
   console.log(`Server (con WebSocket proxy) corriendo en el puerto ${port}`);
 });
 
-wss.on('connection', (clientWs, request) => {
+wss.on('connection', async (clientWs, request) => {
+  console.log('[WebSocket] New connection established');
+  
   try {
     const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
-    console.log("parsedurl", parsedUrl);
-    // Extract vmid, node, ticket, vncPort from query params
+    
+    // Obtener parámetros de la URL
     const vmid = parsedUrl.searchParams.get('vmid');
     const node = parsedUrl.searchParams.get('node');
-    const vncPort = parsedUrl.searchParams.get('vncPort');
-    const vncTicket = parsedUrl.searchParams.get('ticket');
+    const sessionId = parsedUrl.searchParams.get('sessionId');
 
-    // Resolve Proxmox host IP from DB using vmid and node
-    if (!vmid || !node) {
-      console.error('WebSocket connection rejected: Missing vmid or node.');
-      clientWs.close(1011, 'Missing vmid or node');
+    console.log(`[WebSocket] Connection params:`, { vmid, node, sessionId });
+
+    if (!vmid || !node || !sessionId) {
+      console.error('[WebSocket] Missing required parameters');
+      clientWs.close(1011, 'Missing required parameters');
       return;
     }
 
-    // Query DB to get Proxmox host for the VM
-    pool.query(
-      `SELECT h.host FROM hypervisors h
-       JOIN virtual_machines vm ON vm.hypervisor_id = h.id
-       WHERE vm.hypervisor_vm_id = $1 AND h.type = 'proxmox' AND h.status = 'connected'`,
-      [vmid]
-    ).then(result => {
-      if (result.rows.length === 0) {
-        console.log(`No Proxmox host found for VM ${vmid} in DB, attempting to find via Proxmox API scan...`);
-        // Fallback scanning logic to find Proxmox host by checking each connected hypervisor
-        (async () => {
-          try {
-            const { rows: connectedProxmoxHypervisors } = await pool.query(
-              `SELECT id, host, username, api_token, token_name 
-               FROM hypervisors WHERE status = 'connected' AND type = 'proxmox'`
-            );
-            let foundHost = null;
-            for (const hypervisor of connectedProxmoxHypervisors) {
-              const [dbHost, dbPortStr] = hypervisor.host.split(':');
-              const port = dbPortStr ? parseInt(dbPortStr, 10) : 8006;
-              const cleanHost = dbHost;
-              const proxmoxConfigScan = {
-                host: cleanHost, port: port, username: hypervisor.username,
-                tokenID: `${hypervisor.username}!${hypervisor.token_name}`,
-                tokenSecret: hypervisor.api_token, timeout: 5000, rejectUnauthorized: false
-              };
-              const proxmoxClientScan = proxmoxApi(proxmoxConfigScan);
-              try {
-                // Check if VM exists on the given node via Proxmox API
-                await proxmoxClientScan.nodes.$(node).qemu.$(vmid).status.current.$get();
-                foundHost = cleanHost;
-                console.log(`Found VM ${vmid} on node ${node} via hypervisor ${hypervisor.id} (${cleanHost})`);
-                break;
-              } catch {
-                // VM not found on this hypervisor, continue
-              }
-            }
-            if (!foundHost) {
-              console.error(`Could not determine Proxmox host for VM ${vmid} on node ${node} via DB or API scan.`);
-              clientWs.close(1011, 'Proxmox host not found for VM');
-              return;
-            }
-            // Proceed with found host
-            const proxmoxHost = foundHost;
-            const proxmoxPort = 8006; // Default Proxmox API port
-            if (!vncPort || !vncTicket) {
-              console.error('WebSocket connection rejected: Missing vncPort or ticket.');
-              clientWs.close(1011, 'Missing vncPort or ticket');
-              return;
-            }
-            console.log(`WebSocket Connection: Target=${proxmoxHost}:${vncPort}, Ticket=${vncTicket ? 'present' : 'missing'}`);
-            const targetSocket = net.createConnection({ host: proxmoxHost, port: parseInt(vncPort, 10) }, () => {
-              console.log(`Successfully connected to target VNC server: ${proxmoxHost}:${vncPort}`);
-              targetSocket.write(`${vncTicket}\n`);
-              console.log('VNC ticket sent to target.');
-            });
-            // Pipe data between client and target socket
-            clientWs.on('message', (data) => {
-              targetSocket.write(data);
-            });
-            targetSocket.on('data', (data) => {
-              clientWs.send(data);
-            });
-            // Handle errors and close events
-            clientWs.on('close', (code, reason) => {
-              console.log(`Client WebSocket closed: ${code} ${reason}`);
-              targetSocket.end();
-              targetSocket.destroy();
-            });
-            clientWs.on('error', (error) => {
-              console.error('Client WebSocket error:', error);
-              targetSocket.end();
-              targetSocket.destroy();
-            });
-            targetSocket.on('close', () => {
-              console.log('Target VNC socket closed.');
-              clientWs.close();
-            });
-            targetSocket.on('error', (error) => {
-              console.error(`Target VNC socket error (connecting to ${proxmoxHost}:${vncPort}):`, error.message);
-              clientWs.close(1011, `Upstream VNC server connection error: ${error.message}`);
-            });
-          } catch (err) {
-            console.error('Error during Proxmox host scan for VM:', err);
-            clientWs.close(1011, 'Internal server error during WebSocket setup.');
-          }
-        })();
-        return;
+    // Obtener sesión de consola
+    global.consoleSessions = global.consoleSessions || new Map();
+    const consoleSession = global.consoleSessions.get(sessionId);
+
+    if (!consoleSession) {
+      console.error('[WebSocket] Invalid or expired session');
+      clientWs.close(1011, 'Invalid or expired session');
+      return;
+    }
+
+    const { host: proxmoxHost, port: vncPort, ticket } = consoleSession;
+
+    console.log(`[WebSocket] Connecting to Proxmox VNC:`, {
+      host: proxmoxHost,
+      port: vncPort,
+      ticketLength: ticket ? ticket.length : 0
+    });
+
+    // Crear conexión TCP al servidor VNC de Proxmox
+    const targetSocket = net.createConnection({
+      host: proxmoxHost,
+      port: parseInt(vncPort, 10),
+      timeout: 10000
+    });
+
+    let isConnected = false;
+
+    targetSocket.on('connect', () => {
+      console.log(`[WebSocket] Connected to VNC server: ${proxmoxHost}:${vncPort}`);
+      isConnected = true;
+      
+      // Enviar ticket de autenticación
+      targetSocket.write(`${ticket}\n`);
+      console.log('[WebSocket] VNC ticket sent');
+    });
+
+    targetSocket.on('timeout', () => {
+      console.error('[WebSocket] Connection to VNC server timed out');
+      if (!isConnected) {
+        clientWs.close(1011, 'Connection timeout');
       }
-      const proxmoxHost = result.rows[0].host.split(':')[0];
-      const proxmoxPort = 8006; // Default Proxmox API port
+    });
 
-      if (!vncPort || !vncTicket) {
-        console.error('WebSocket connection rejected: Missing vncPort or ticket.');
-        clientWs.close(1011, 'Missing vncPort or ticket');
-        return;
-      }
-
-      console.log(`WebSocket Connection: Target=${proxmoxHost}:${vncPort}, Ticket=${vncTicket ? 'present' : 'missing'}`);
-
-      const targetSocket = net.createConnection({ host: proxmoxHost, port: parseInt(vncPort, 10) }, () => {
-        console.log(`[${new Date().toISOString()}] Successfully connected to target VNC server: ${proxmoxHost}:${vncPort}`);
-        targetSocket.write(`${vncTicket}\n`);
-        console.log(`[${new Date().toISOString()}] VNC ticket sent to target.`);
-      });
-
-      // --- Pipe data between client and target socket ---
-      clientWs.on('message', (data) => {
-        console.log(`[${new Date().toISOString()}] Client WebSocket sent data: ${data.length} bytes`);
+    // Manejar datos del cliente WebSocket hacia VNC
+    clientWs.on('message', (data) => {
+      if (targetSocket.writable) {
         targetSocket.write(data);
-      });
-      targetSocket.on('data', (data) => {
-        console.log(`[${new Date().toISOString()}] Target socket sent data: ${data.length} bytes`);
+      }
+    });
+
+    // Manejar datos del servidor VNC hacia cliente WebSocket
+    targetSocket.on('data', (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(data);
-      });
+      }
+    });
 
-      // --- Handle errors and close events ---
-      clientWs.on('open', () => {
-        console.log(`[${new Date().toISOString()}] Client WebSocket connection opened.`);
-      });
-      clientWs.on('close', (code, reason) => {
-        console.log(`[${new Date().toISOString()}] Client WebSocket closed: code=${code}, reason=${reason ? reason.toString() : 'N/A'}`);
-        targetSocket.end();
+    // Manejar cierre del cliente WebSocket
+    clientWs.on('close', (code, reason) => {
+      console.log(`[WebSocket] Client disconnected: ${code} ${reason?.toString() || 'N/A'}`);
+      if (!targetSocket.destroyed) {
         targetSocket.destroy();
-      });
-      clientWs.on('error', (error) => {
-        console.error(`[${new Date().toISOString()}] Client WebSocket error:`, error);
-        targetSocket.end();
+      }
+      // Limpiar sesión
+      global.consoleSessions.delete(sessionId);
+    });
+
+    // Manejar errores del cliente WebSocket
+    clientWs.on('error', (error) => {
+      console.error('[WebSocket] Client error:', error);
+      if (!targetSocket.destroyed) {
         targetSocket.destroy();
-      });
-      targetSocket.on('close', (hadError) => {
-        console.log(`[${new Date().toISOString()}] Target VNC socket closed. Had error: ${hadError}`);
+      }
+    });
+
+    // Manejar cierre del socket VNC
+    targetSocket.on('close', (hadError) => {
+      console.log(`[WebSocket] VNC socket closed, hadError: ${hadError}`);
+      if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.close();
-      });
-      targetSocket.on('error', (error) => {
-        console.error(`[${new Date().toISOString()}] Target VNC socket error (connecting to ${proxmoxHost}:${vncPort}):`, error.message);
-        // Enhanced diagnostic logging
-        console.error('Diagnostic Info:');
-        console.error(`- Proxmox Host: ${proxmoxHost}`);
-        console.error(`- VNC Port: ${vncPort}`);
-        console.error(`- VNC Ticket Length: ${vncTicket ? vncTicket.length : 0}`);
+      }
+    });
 
-        // Retry logic: attempt to reconnect up to 3 times with delay
-        if (!targetSocket.retryCount) targetSocket.retryCount = 0;
-        if (targetSocket.retryCount < 3) {
-          targetSocket.retryCount++;
-          const retryDelay = 2000 * targetSocket.retryCount; // Exponential backoff
-          console.log(`[${new Date().toISOString()}] Retrying connection attempt ${targetSocket.retryCount} in ${retryDelay}ms...`);
-          setTimeout(() => {
-            const newSocket = net.createConnection({ host: proxmoxHost, port: parseInt(vncPort, 10) }, () => {
-              console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: Connected to target VNC server: ${proxmoxHost}:${vncPort}`);
-              newSocket.write(`${vncTicket}\n`);
-              console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: VNC ticket sent to target.`);
-            });
-
-            // Re-attach event handlers to new socket
-            newSocket.on('data', (data) => {
-              console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: Target socket sent data: ${data.length} bytes`);
-              clientWs.send(data);
-            });
-            newSocket.on('close', (hadError) => {
-              console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: Target VNC socket closed. Had error: ${hadError}`);
-              clientWs.close();
-            });
-            newSocket.on('error', (err) => {
-              console.error(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: Target VNC socket error: ${err.message}`);
-            });
-
-            // Replace old socket with new socket
-            targetSocket.destroy();
-            // Cannot reassign const variable, so no reassignment here
-            // Instead, log that retry socket is created
-            console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: New socket created for retry, old socket destroyed.`);
-          }, retryDelay);
+    // Manejar errores del socket VNC
+    targetSocket.on('error', (error) => {
+      console.error(`[WebSocket] VNC socket error:`, error.message);
+      
+      if (clientWs.readyState === WebSocket.OPEN) {
+        if (error.code === 'ECONNREFUSED') {
+          clientWs.close(1011, 'VNC server connection refused');
+        } else if (error.code === 'ETIMEDOUT') {
+          clientWs.close(1011, 'VNC server connection timeout');
         } else {
-          console.error(`[${new Date().toISOString()}] Max retry attempts reached. Closing client WebSocket.`);
-          clientWs.close(1011, `Upstream VNC server connection error: ${error.message}`);
+          clientWs.close(1011, `VNC server error: ${error.message}`);
         }
-      });
-    }).catch(err => {
-      console.error('Error querying Proxmox host for VM:', err);
-      clientWs.close(1011, 'Internal server error during WebSocket setup.');
+      }
     });
 
   } catch (error) {
-    console.error('Error in WebSocket connection handler:', error);
-    clientWs.close(1011, 'Internal server error during WebSocket setup.');
+    console.error('[WebSocket] Error in connection handler:', error);
+    clientWs.close(1011, 'Internal server error');
   }
 });

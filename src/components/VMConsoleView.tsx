@@ -83,48 +83,62 @@ const VMConsoleView: React.FC<VMConsoleViewProps> = ({ consoleDetails, onClose, 
       // Disconnect previous instance if any
       if (vncRef.current) {
         vncRef.current.disconnect();
+        vncRef.current = null;
       }
-
+  
       const details = selectedOption.connectionDetails as ProxmoxConnectionDetails;
       if (!details.vmid || !details.node) {
-          onError("VM ID or Node is missing in Proxmox connection details.");
-          return;
+        onError("VM ID or Node is missing in Proxmox connection details.");
+        return;
       }
-
-      // Construct the WebSocket URL to *your* backend proxy
+  
+      // CORRECCIÓN: Usar sessionId en lugar de ticket/vncPort
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.host; // Connect to the same host as the web app
-      // Include ticket and vncPort in the WebSocket URL query parameters
-      const ticketParam = encodeURIComponent((details.ticket || '').toString());
-      const vncPortParam = encodeURIComponent((details.vncPort || '').toString());
-      const proxyUrl = `${proto}//${host}/api/ws/proxmox-console?vmid=${details.vmid}&node=${details.node}&ticket=${ticketParam}&vncPort=${vncPortParam}`;
-
+      const host = window.location.host;
+      
+      // Obtener sessionId de la respuesta de /api/vms/:id/console
+      const sessionId = (selectedOption as any).sessionId;
+      if (!sessionId) {
+        onError("Session ID is missing for console connection.");
+        return;
+      }
+  
+      const proxyUrl = `${proto}//${host}/api/ws/proxmox-console?vmid=${details.vmid}&node=${details.node}&sessionId=${sessionId}`;
+  
       console.log(`Connecting to backend WebSocket proxy: ${proxyUrl}`);
-
+  
       try {
         const rfb = new VNC(screenRef.current, proxyUrl, {
-            // The backend proxy will handle credentials (PVEAuthCookie and the VNC ticket)
-            // We don't pass them from the client here.
+          credentials: {
+            // No credentials needed, handled by backend
+          }
         });
+        
         vncRef.current = rfb;
-
-        rfb.addEventListener('disconnect', (event: any) => {
-            console.log('noVNC disconnected:', event.detail);
-            if (!event.detail.clean) {
-                onError('Console disconnected unexpectedly. Please try again.');
-            }
+  
+        rfb.addEventListener('connect', () => {
+          console.log('noVNC connected successfully');
         });
-
+  
+        rfb.addEventListener('disconnect', (event: any) => {
+          console.log('noVNC disconnected:', event.detail);
+          if (!event.detail.clean) {
+            onError(`Console disconnected: ${event.detail.reason || 'Unknown error'}`);
+          }
+        });
+  
+        rfb.addEventListener('securityfailure', (event: any) => {
+          console.error('noVNC security failure:', event.detail);
+          onError('Console authentication failed. Please try again.');
+        });
+  
       } catch (e: any) {
-        onError(`Failed to initialize noVNC client: ${e.message}`);
+        console.error('Failed to initialize noVNC:', e);
+        onError(`Failed to initialize console: ${e.message}`);
       }
     }
-    // Handle other console types like vsphere_html5 (which might still use an iframe)
-    else if (selectedOption && selectedOption.type === 'vsphere_html5') {
-        // The iframe logic for vSphere HTML5 can remain if it works
-    }
-
   }, [selectedOption, onError]);
+  
 
   const renderConsoleContent = () => {
     if (!selectedOption) {
