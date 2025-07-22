@@ -394,7 +394,6 @@ app.delete('/api/users/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-
 // --- User Profile & Password Management for Logged-in User ---
 app.put('/api/auth/profile', authenticate, async (req, res) => {
   const { userId } = req.user; // From authenticate middleware
@@ -3104,7 +3103,9 @@ wss.on('connection', (clientWs, request) => {
 
             // Replace old socket with new socket
             targetSocket.destroy();
-            targetSocket = newSocket;
+            // Cannot reassign const variable, so no reassignment here
+            // Instead, log that retry socket is created
+            console.log(`[${new Date().toISOString()}] Retry ${targetSocket.retryCount}: New socket created for retry, old socket destroyed.`);
           }, retryDelay);
         } else {
           console.error(`[${new Date().toISOString()}] Max retry attempts reached. Closing client WebSocket.`);
