@@ -121,7 +121,7 @@ const VMConsoleView: React.FC<VMConsoleViewProps> = ({ consoleDetails, onClose, 
         });
   
         rfb.addEventListener('disconnect', (event: any) => {
-          console.log('noVNC disconnected:', event.detail);
+          console.log('noVNC disconnected:', event.detail, event);
           if (!event.detail.clean) {
             onError(`Console disconnected: ${event.detail.reason || 'Unknown error'}`);
           }

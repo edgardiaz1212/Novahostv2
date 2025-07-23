@@ -12,7 +12,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import http from 'http'; // o https si tu servidor Express ya usa HTTPS
 import net from 'net';
 import { URL } from 'url';
-
+import { Agent } from 'https'
 dotenv.config();
 
 const app = express();
@@ -927,52 +927,40 @@ app.post('/api/vms/:id/console', authenticate, async (req, res) => {
       });
     }
 
-    // Obtener ticket VNC de Proxmox
-    console.log(`Console: Requesting VNC proxy for Proxmox VM ${vmExternalId} on node ${targetNode}`);
-    
-    // CORRECCIÓN: Obtener ticket primero desde vncproxy usando POST en lugar de GET
-    const vncProxyResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncproxy.$post();
-
-    if (!vncProxyResponse.ticket) {
-      console.error(`Proxmox vncproxy response missing ticket for VM ${vmExternalId}`);
-      throw new Error('Proxmox vncproxy response missing ticket');
+    // ✅ Verificar que la VM esté encendida
+    const vmStatus = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).status.current.$get();
+    if (vmStatus.status !== 'running') {
+      return res.status(400).json({
+        error: `VM ${vmExternalId} is not running. Cannot access console.`
+      });
     }
 
-    // Ahora llamar a vncwebsocket con vncticket
-    const vncWebsocketResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncwebsocket.$get({
-      port: 5900, // Puerto VNC por defecto
-      vncticket: vncProxyResponse.ticket
-    });
+    // ✅ Obtener ticket VNC de Proxmox
+    console.log(`Console: Requesting VNC proxy for Proxmox VM ${vmExternalId} on node ${targetNode}`);
+    const vncProxyResponse = await proxmoxClientInstance.nodes.$(targetNode).qemu.$(vmExternalId).vncproxy.$post();
+console.log("vncproxyresponse", vncProxyResponse)
+    if (!vncProxyResponse.ticket || !vncProxyResponse.port) {
+      console.error(`Proxmox vncproxy response missing ticket or port for VM ${vmExternalId}`);
+      throw new Error('Proxmox vncproxy response missing required fields');
+    }
 
     const [apiHost] = targetHypervisor.host.split(':');
-    const proxmoxApiPort = 8006; // Puerto por defecto de Proxmox
 
-    console.log(`Proxmox VNC WebSocket obtained:`, {
-      port: vncWebsocketResponse.port,
-      ticket: vncProxyResponse.ticket ? 'present' : 'missing'
-    });
-
-    if (!vncWebsocketResponse.port || !vncProxyResponse.ticket) {
-      console.error(`Proxmox vncwebsocket response incomplete for VM ${vmExternalId}`);
-      throw new Error('Proxmox vncwebsocket response was incomplete');
-    }
-
-    // Guardar temporalmente el ticket para validación posterior
+    // ✅ Guardar solo metadatos (NO el ticket ni el puerto)
     const consoleSession = {
       vmid: vmExternalId,
       node: targetNode,
       host: apiHost,
-      port: vncProxyResponse.port,
-      ticket: vncProxyResponse.ticket,
+      hypervisorId: targetHypervisor.id,
       timestamp: Date.now()
     };
 
-    // Usar un cache temporal (puedes usar Redis en producción)
+    // ✅ Usar un cache temporal (puedes usar Redis en producción)
     global.consoleSessions = global.consoleSessions || new Map();
     const sessionId = `${vmExternalId}-${targetNode}-${Date.now()}`;
     global.consoleSessions.set(sessionId, consoleSession);
 
-    // Limpiar sesiones antiguas (más de 10 minutos)
+    // ✅ Limpiar sesiones antiguas (más de 10 minutos)
     const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
     for (const [key, session] of global.consoleSessions.entries()) {
       if (session.timestamp < tenMinutesAgo) {
@@ -980,17 +968,15 @@ app.post('/api/vms/:id/console', authenticate, async (req, res) => {
       }
     }
 
+    // ✅ Respuesta segura: no exponer ticket ni vncPort
     res.json({
       type: 'proxmox',
       sessionId,
       connectionDetails: {
         host: apiHost,
-        port: proxmoxApiPort,
-        vmid: vmExternalId,
         node: targetNode,
-        vmName: vmNameForConsole,
-        vncPort: vncProxyResponse.port
-        // No enviamos el ticket al frontend por seguridad
+        vmid: vmExternalId,
+        vmName: vmNameForConsole
       }
     });
 
@@ -3016,11 +3002,10 @@ server.listen(port, () => {
 
 wss.on('connection', async (clientWs, request) => {
   console.log('[WebSocket] New connection established');
-  
+
   try {
     const parsedUrl = new URL(request.url, `http://${request.headers.host}`);
     
-    // Obtener parámetros de la URL
     const vmid = parsedUrl.searchParams.get('vmid');
     const node = parsedUrl.searchParams.get('node');
     const sessionId = parsedUrl.searchParams.get('sessionId');
@@ -3033,7 +3018,7 @@ wss.on('connection', async (clientWs, request) => {
       return;
     }
 
-    // Obtener sesión de consola
+    // Obtener sesión de consola (solo para host y validación)
     global.consoleSessions = global.consoleSessions || new Map();
     const consoleSession = global.consoleSessions.get(sessionId);
 
@@ -3043,96 +3028,124 @@ wss.on('connection', async (clientWs, request) => {
       return;
     }
 
-    const { host: proxmoxHost, port: vncPort, ticket } = consoleSession;
+    const { host: proxmoxHost } = consoleSession;
 
-    console.log(`[WebSocket] Connecting to Proxmox VNC:`, {
-      host: proxmoxHost,
-      port: vncPort,
-      ticketLength: ticket ? ticket.length : 0
+    // 🔁 REGENERAR EL TICKET: No usar el guardado
+    // 1. Obtener credenciales del hipervisor
+    const { rows: [hypervisor] } = await pool.query(
+      'SELECT username, api_token, token_name, host FROM hypervisors WHERE host LIKE $1 AND status = $2',
+      [`${proxmoxHost}%`, 'connected']
+    );
+
+    if (!hypervisor) {
+      console.error('[WebSocket] Hypervisor not found or not connected');
+      clientWs.close(1011, 'Hypervisor not available');
+      return;
+    }
+
+    // 2. Crear cliente Proxmox
+    const [dbHost, dbPortStr] = hypervisor.host.split(':');
+    const port = dbPortStr ? parseInt(dbPortStr, 10) : 8006;
+    const cleanHost = dbHost;
+
+    const proxmoxConfig = {
+      host: cleanHost,
+      port: port,
+      username: hypervisor.username,
+      tokenID: `${hypervisor.username}!${hypervisor.token_name}`,
+      tokenSecret: hypervisor.api_token,
+      timeout: 10000,
+      rejectUnauthorized: false
+    };
+
+    const proxmoxClientInstance = proxmoxApi(proxmoxConfig);
+
+    // 3. Generar nuevo ticket VNC
+    console.log(`[WebSocket] Regenerating VNC ticket for VM ${vmid} on node ${node}`);
+    const vncProxyResponse = await proxmoxClientInstance.nodes.$(node).qemu.$(vmid).vncproxy.$post();
+
+    if (!vncProxyResponse.ticket || !vncProxyResponse.port) {
+      console.error(`[WebSocket] Failed to generate VNC ticket for VM ${vmid}`);
+      clientWs.close(1011, 'Failed to generate VNC ticket');
+      return;
+    }
+
+    const ticket = vncProxyResponse.ticket;
+    const vncPort = vncProxyResponse.port;
+
+    // 4. Construir URL a Proxmox
+    const proto = 'wss:';
+    const wsUrl = `${proto}//${proxmoxHost}:8006/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${vncPort}&vncticket=${encodeURIComponent(ticket)}`;
+    //const wsUrl = `${proto}//proxmox06:8006/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${vncPort}&vncticket=${encodeURIComponent(ticket)}`;
+
+    console.log(`[WebSocket] Connecting to Proxmox WebSocket URL: ${wsUrl.replace(ticket, '***')}`);
+
+    // 5. Conectar al WebSocket de Proxmox
+ const proxmoxWs = new WebSocket(wsUrl, {
+  agent: new Agent({
+    rejectUnauthorized: false
+  }),
+  checkServerIdentity: () => undefined
+});
+
+    proxmoxWs.on('open', () => {
+      console.log(`[WebSocket] Connected to Proxmox VNC WebSocket`);
     });
 
-    // Crear conexión TCP al servidor VNC de Proxmox
-    const targetSocket = net.createConnection({
-      host: proxmoxHost,
-      port: parseInt(vncPort, 10),
-      timeout: 10000
-    });
-
-    let isConnected = false;
-
-    targetSocket.on('connect', () => {
-      console.log(`[WebSocket] Connected to VNC server: ${proxmoxHost}:${vncPort}`);
-      isConnected = true;
-      
-      // Enviar ticket de autenticación
-      targetSocket.write(`${ticket}\n`);
-      console.log('[WebSocket] VNC ticket sent');
-    });
-
-    targetSocket.on('timeout', () => {
-      console.error('[WebSocket] Connection to VNC server timed out');
-      if (!isConnected) {
-        clientWs.close(1011, 'Connection timeout');
-      }
-    });
-
-    // Manejar datos del cliente WebSocket hacia VNC
-    clientWs.on('message', (data) => {
-      if (targetSocket.writable) {
-        targetSocket.write(data);
-      }
-    });
-
-    // Manejar datos del servidor VNC hacia cliente WebSocket
-    targetSocket.on('data', (data) => {
+    proxmoxWs.on('message', (data) => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(data);
       }
     });
 
-    // Manejar cierre del cliente WebSocket
-    clientWs.on('close', (code, reason) => {
-      console.log(`[WebSocket] Client disconnected: ${code} ${reason?.toString() || 'N/A'}`);
-      if (!targetSocket.destroyed) {
-        targetSocket.destroy();
+    proxmoxWs.on('close', (code, reason) => {
+      console.log(`[WebSocket] Proxmox VNC WebSocket closed: ${code} ${reason?.toString() || 'N/A'}`);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(code, reason);
+      }
+    });
+
+    proxmoxWs.on('error', (error) => {
+      console.error(`[WebSocket] Proxmox VNC WebSocket error:`, error.message);
+      const reason = `Proxy error: ${error.message.substring(0, 100)}`;
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(1011, reason);
+      }
+    });
+
+    // Reenviar mensajes del cliente al Proxmox
+    clientWs.on('message', (data) => {
+      if (proxmoxWs.readyState === WebSocket.OPEN) {
+        proxmoxWs.send(data);
+      }
+    });
+
+    // Manejar cierre del cliente
+    clientWs.on('close', () => {
+      console.log(`[WebSocket] Client disconnected`);
+      if (proxmoxWs.readyState === WebSocket.OPEN || proxmoxWs.readyState === WebSocket.CONNECTING) {
+        proxmoxWs.close();
       }
       // Limpiar sesión
       global.consoleSessions.delete(sessionId);
     });
 
-    // Manejar errores del cliente WebSocket
+    // Manejar errores del cliente
     clientWs.on('error', (error) => {
       console.error('[WebSocket] Client error:', error);
-      if (!targetSocket.destroyed) {
-        targetSocket.destroy();
-      }
-    });
-
-    // Manejar cierre del socket VNC
-    targetSocket.on('close', (hadError) => {
-      console.log(`[WebSocket] VNC socket closed, hadError: ${hadError}`);
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close();
-      }
-    });
-
-    // Manejar errores del socket VNC
-    targetSocket.on('error', (error) => {
-      console.error(`[WebSocket] VNC socket error:`, error.message);
-      
-      if (clientWs.readyState === WebSocket.OPEN) {
-        if (error.code === 'ECONNREFUSED') {
-          clientWs.close(1011, 'VNC server connection refused');
-        } else if (error.code === 'ETIMEDOUT') {
-          clientWs.close(1011, 'VNC server connection timeout');
-        } else {
-          clientWs.close(1011, `VNC server error: ${error.message}`);
-        }
+      if (proxmoxWs.readyState === WebSocket.OPEN || proxmoxWs.readyState === WebSocket.CONNECTING) {
+        proxmoxWs.close();
       }
     });
 
   } catch (error) {
     console.error('[WebSocket] Error in connection handler:', error);
-    clientWs.close(1011, 'Internal server error');
+    try {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(1011, 'Internal server error');
+      }
+    } catch (closeError) {
+      console.error('[WebSocket] Failed to send close message:', closeError);
+    }
   }
 });
