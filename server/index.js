@@ -3076,7 +3076,7 @@ wss.on('connection', async (clientWs, request) => {
     // 4. Construir URL a Proxmox
     const proto = 'wss:';
     const wsUrl = `${proto}//${proxmoxHost}:8006/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${vncPort}&vncticket=${encodeURIComponent(ticket)}`;
-    //const wsUrl = `${proto}//proxmox06:8006/api2/json/nodes/${node}/qemu/${vmid}/vncwebsocket?port=${vncPort}&vncticket=${encodeURIComponent(ticket)}`;
+
 
     console.log(`[WebSocket] Connecting to Proxmox WebSocket URL: ${wsUrl.replace(ticket, '***')}`);
 
