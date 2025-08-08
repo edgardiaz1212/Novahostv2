@@ -4,6 +4,7 @@ import { useAuth } from "./hooks/useAuth";
 import Layout from "./components/layout/Layout";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import LoadingScreen from "./components/ui/LoadingScreen";
+import VMConsole from "./pages/VMConsole";
 
 // Lazy load pages for better performance
 const Dashboard = lazy(() => import("./pages/Dashboard"));
@@ -17,7 +18,7 @@ const Profile = lazy(() => import("./pages/Profile"));
 const HypervisorDetails = lazy(() => import("./pages/HypervisorDetails"));
 const Stats = lazy(() => import("./pages/Stats"));
 const PreferencesPage = lazy(() => import("./pages/PreferencesPage"));
-const StandaloneConsolePage = lazy(() => import("./pages/StandaloneConsolePage")); // Importar la nueva página
+
 
 function App() {
   const { isAuthenticated, user } = useAuth(); // Destructure user as well
@@ -120,10 +121,14 @@ function App() {
           />
         </Route>
 
-         {/* Ruta para la consola en ventana aparte - No necesita Layout */}
+         {/* Ruta para la consola en ventana aparte */}
          <Route
-          path="/vm-console"
-          element={<StandaloneConsolePage />}
+          path="/console/:id"
+          element={
+            <ProtectedRoute>
+              <VMConsole />
+            </ProtectedRoute>
+          }
         />
 
         <Route path="*" element={<NotFound />} />

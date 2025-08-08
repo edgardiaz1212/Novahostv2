@@ -24,7 +24,6 @@ import type { VM, VMMetrics, PowerAction } from "../types/vm"; // Use the correc
 import { formatBytes } from "../utils/formatters"; // Helper function to format bytes (create this file if needed)
 import { toast } from "react-hot-toast";
 import { useAuth } from "../hooks/useAuth"; // Import ConsoleDetailsData
-import { type ConsoleDetailsData } from "../components/VMConsoleView";
 import VMControls from "../components/vmdetails/VMControls"; // Import the new VMControls component
 import VMHistoricalMetrics from "../components/vmdetails/VMHistoricalMetrics"; // Import historical metrics component
 
@@ -39,6 +38,7 @@ export default function VMDetails() {
   const { user, token: authToken } = useAuth(); // Get user and token from context
   const [isConsoleLoading, setIsConsoleLoading] = useState(false);
 
+; // Debugging line to check auth token
   const fetchVMDetails = async () => {
     if (!id) return;
     setLoading(true);
@@ -104,88 +104,6 @@ export default function VMDetails() {
     return () => clearInterval(intervalId); // Cleanup interval on unmount or when VM/status changes
   }, [id, vm, vm?.status, authToken]); // Re-run if VM data or status changes
 
-  const handleOpenConsole = async () => {
-    if (!vm) return;
-    setIsConsoleLoading(true);
-    try {
-      const response = await fetch(`${API_BASE_URL}/vms/${vm.id}/console`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken && { Authorization: `Bearer ${authToken}` }),
-        },
-      });
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(
-          errorData.details ||
-            errorData.error ||
-            `Failed to get console details (status: ${response.status})`
-        );
-      }
-      const rawData = await response.json(); // Get the raw, potentially malformed data
-      console.log("VMDetails: Raw console data from API:", rawData);
-      
-      let finalData: ConsoleDetailsData;
-
-      // Caso 1: Estructura anidada específica de vSphere
-      if (rawData && rawData.type === 'vsphere_undefined' && rawData.connectionDetails && Array.isArray(rawData.connectionDetails.consoleOptions)) {
-        console.log("VMDetails: Detected vSphere-specific nested structure. Applying correction.");
-        let extractedVmName: string = vm?.name || 'VM'; // Use actual VM name if available, else default
-        const vSphereConsoleOptions = rawData.connectionDetails.consoleOptions;
-
-        if (vSphereConsoleOptions.length > 0 && vSphereConsoleOptions[0].vmName) {
-          extractedVmName = vSphereConsoleOptions[0].vmName;
-        }
-        finalData = {
-          vmName: extractedVmName,
-          consoleOptions: vSphereConsoleOptions,
-        };
-              // Caso 2: La respuesta ya es ConsoleDetailsData (puede tener múltiples opciones)
-
-      } else if (rawData && typeof rawData.vmName === 'string' && Array.isArray(rawData.consoleOptions)) {
-        console.log("VMDetails: Assuming standard ConsoleDetailsData structure.");
-        finalData = rawData as ConsoleDetailsData;
-     // Caso 3: La respuesta es una única ConsoleOption (típico de Proxmox si el backend simplifica)
-    } else if (rawData && typeof rawData.type === 'string' && typeof rawData.connectionDetails === 'object') {
-      console.log("VMDetails: Detected single ConsoleOption structure. Wrapping into ConsoleDetailsData.");
-      // Asumimos que vm.name es el nombre correcto de la VM para este caso.
-      // Si rawData.vmName existe, se podría usar, pero los logs de Proxmox no lo muestran en el nivel superior.
-      const singleOption = rawData as any; // Cast a 'any' para acceder a vmName si existe en la opción
-      finalData = {
-        vmName: singleOption.vmName || vm?.name || 'VM', // Usar vmName de la opción, o del estado de VM, o default
-        consoleOptions: [singleOption], // Envolver la opción única en un array
-      };
-      // Asegurarse que la opción individual tenga un vmName si no lo tiene
-      if (!finalData.consoleOptions[0].vmName) {
-        finalData.consoleOptions[0].vmName = finalData.vmName;
-        }
-        
-      } else {
-        console.error("VMDetails: Unexpected raw console data structure from API:", rawData);
-        toast.error("Received unexpected console data structure from server.");
-        setIsConsoleLoading(false);
-        return; // Stop further processing
-      }
-      
-      console.log("VMDetails: Storing final console details in sessionStorage:", finalData);
-      sessionStorage.setItem('vmConsoleDetails', JSON.stringify(finalData));
-
-      
-
-      // Open a new window/tab for the console
-      const consoleWindow = window.open('/vm-console', '_blank', 'width=1024,height=768,resizable=yes,scrollbars=yes');
-      if (!consoleWindow) {
-        toast.error("Failed to open console window. Please check your browser's pop-up blocker settings.");
-      }
-    } catch (error: any) {
-      console.error("Error fetching console details:", error);
-      toast.error(`Failed to open console: ${error.message}`);
-       } finally {
-      setIsConsoleLoading(false);
-    }
-  };
-
   const handleVMAction = async (action: PowerAction) => {
     if (!vm) {
       toast.error("VM data not available to perform action.");
@@ -206,15 +124,21 @@ export default function VMDetails() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.details || errorData.error || `Failed to perform action: ${action}`);
+        throw new Error(
+          errorData.details ||
+            errorData.error ||
+            `Failed to perform action: ${action}`
+        );
       }
 
-      toast.success(`Action '${action}' initiated successfully for ${vm.name}.`);
+      toast.success(
+        `Action '${action}' initiated successfully for ${vm.name}.`
+      );
       // Refresh VM details after a short delay to allow hypervisor to process
       setTimeout(() => {
         fetchVMDetails(); // Use the new standalone fetch function
         // Also refetch metrics if VM was started/resumed
-        if (action === 'start' || action === 'resume') setMetricsLoading(true); // This will trigger metrics useEffect
+        if (action === "start" || action === "resume") setMetricsLoading(true); // This will trigger metrics useEffect
       }, 3000); // Adjust delay as needed
     } catch (error: any) {
       console.error(`Error performing action ${action} on VM ${vm.id}:`, error);
@@ -262,7 +186,10 @@ export default function VMDetails() {
     <div className="container mx-auto px-4 py-8">
       {/* Botón Volver */}
       <div className="mb-4">
-        <Link to="/" className="inline-flex items-center text-sm text-primary-600 dark:text-primary-400 hover:underline">
+        <Link
+          to="/"
+          className="inline-flex items-center text-sm text-primary-600 dark:text-primary-400 hover:underline"
+        >
           <ArrowLeft className="h-4 w-4 mr-1" />
           Volver al Dashboard
         </Link>
@@ -289,25 +216,24 @@ export default function VMDetails() {
                 <Power className="w-4 h-4 mr-1" />
                 {vm.status.charAt(0).toUpperCase() + vm.status.slice(1)}
               </span>
-            {/* Console Button */}
-            {vm.status === "running" && (
-                <button
-                    onClick={handleOpenConsole}
-                    disabled={isConsoleLoading}
-                    className="ml-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              {vm.status === "running" &&  (
+                <Link
+                  to={`/console/${vm.id}`} // Usar nuestro ID de VM, no el de Proxmox
+                  //target="_blank" // Abrir en nueva pestaña
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-primary-100 text-primary-800 dark:bg-primary-900 dark:text-primary-200 hover:bg-primary-200 dark:hover:bg-primary-800 transition-colors"
                 >
-                    <TerminalSquare className="w-5 h-5 mr-2" />
-                    {isConsoleLoading ? "Loading..." : "Open Console"}
-                </button>
-            )}
-            </div> 
-     
+                  <TerminalSquare className="w-4 h-4 mr-1" />
+                  Abrir Consola
+                </Link>
+              )}
+            </div>
           </div>
         </div>
 
         {/* VM Controls Section */}
-        {vm && (user?.role === 'admin' || user?.role === 'user') && (
-            <VMControls vm={vm} onAction={handleVMAction} />
+        {vm && (user?.role === "admin" || user?.role === "user") && (
+          <VMControls vm={vm} onAction={handleVMAction} />
         )}
 
         {/* Details Grid */}
@@ -408,127 +334,170 @@ export default function VMDetails() {
                   </div>
                 </div>
               )}
-                {/* OS Type */}
-                {vm.specs.os && (
-                  <div className="flex items-start space-x-2 pt-1">
-
+              {/* OS Type */}
+              {vm.specs.os && (
+                <div className="flex items-start space-x-2 pt-1">
                   <ServerCog className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                   <div>
                     <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
                       Sistema Operativo:
                     </span>
                     <p className="text-slate-800 dark:text-slate-100">
-                      {vm.specs.os} 
+                      {vm.specs.os}
                       {/* Podrías tener una función para mapear 'l26' a 'Linux 2.6-6.x Kernel' o similar si quieres */}
                     </p>
                   </div>
                 </div>
               )}
               {/* Proxmox Specific Config Details */}
-              {vm.hypervisorType === 'proxmox' && (
+              {vm.hypervisorType === "proxmox" && (
                 <>
                   {vm.arch && (
                     <div className="flex items-start space-x-2 pt-1">
                       <Cpu className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Architecture:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.arch}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Architecture:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.arch}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.machine && (
+                  {vm.machine && (
                     <div className="flex items-start space-x-2 pt-1">
                       <ServerCog className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Machine Type:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.machine}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Machine Type:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.machine}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.keyboard && (
+                  {vm.keyboard && (
                     <div className="flex items-start space-x-2 pt-1">
                       <TerminalSquare className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Keyboard Layout:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.keyboard}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Keyboard Layout:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.keyboard}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.kvm !== undefined && (
+                  {vm.kvm !== undefined && (
                     <div className="flex items-start space-x-2 pt-1">
                       <ToggleRight className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">KVM Virtualization:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.kvm === 1 ? 'Enabled' : 'Disabled'}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          KVM Virtualization:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.kvm === 1 ? "Enabled" : "Disabled"}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.onboot !== undefined && (
+                  {vm.onboot !== undefined && (
                     <div className="flex items-start space-x-2 pt-1">
                       <ToggleRight className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Start on Boot:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.onboot === 1 ? 'Yes' : 'No'}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Start on Boot:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.onboot === 1 ? "Yes" : "No"}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.autostart !== undefined && (
+                  {vm.autostart !== undefined && (
                     <div className="flex items-start space-x-2 pt-1">
                       <ToggleRight className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Autostart Enabled:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.autostart === 1 ? 'Yes' : 'No'}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Autostart Enabled:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.autostart === 1 ? "Yes" : "No"}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.startdate && (
+                  {vm.startdate && (
                     <div className="flex items-start space-x-2 pt-1">
                       <Clock className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Autostart Date:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.startdate}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Autostart Date:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.startdate}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.agent !== undefined && (
+                  {vm.agent !== undefined && (
                     <div className="flex items-start space-x-2 pt-1">
                       <ToggleRight className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">QEMU Guest Agent Configured:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.agent === 1 ? 'Yes' : 'No'}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          QEMU Guest Agent Configured:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.agent === 1 ? "Yes" : "No"}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.nameserver && (
+                  {vm.nameserver && (
                     <div className="flex items-start space-x-2 pt-1">
                       <Network className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">Nameserver:</span>
-                        <p className="text-slate-800 dark:text-slate-100">{vm.nameserver}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          Nameserver:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100">
+                          {vm.nameserver}
+                        </p>
                       </div>
                     </div>
                   )}
-                   {vm.args && (
+                  {vm.args && (
                     <div className="flex items-start space-x-2 pt-1">
                       <FileText className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
-                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">QEMU Args:</span>
-                        <p className="text-slate-800 dark:text-slate-100 whitespace-pre-wrap">{vm.args}</p>
+                        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                          QEMU Args:
+                        </span>
+                        <p className="text-slate-800 dark:text-slate-100 whitespace-pre-wrap">
+                          {vm.args}
+                        </p>
                       </div>
                     </div>
                   )}
                 </>
               )}
-               {/* vSphere Specific Details */}
-               {vm.hypervisorType === 'vsphere' && vm.vmwareToolsStatus && (
-                 <div className="flex items-start space-x-2 pt-1">
-                   <ServerCog className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
-                   <div>
-                     <span className="text-sm font-medium text-slate-600 dark:text-slate-300">VMware Tools Status:</span>
-                     <p className="text-slate-800 dark:text-slate-100">{vm.vmwareToolsStatus}</p>
-                   </div>
-                 </div>
-               )}
+              {/* vSphere Specific Details */}
+              {vm.hypervisorType === "vsphere" && vm.vmwareToolsStatus && (
+                <div className="flex items-start space-x-2 pt-1">
+                  <ServerCog className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                      VMware Tools Status:
+                    </span>
+                    <p className="text-slate-800 dark:text-slate-100">
+                      {vm.vmwareToolsStatus}
+                    </p>
+                  </div>
+                </div>
+              )}
               {/* Description */}
               {vm.description && (
                 <div className="flex items-start space-x-2 pt-1">
@@ -564,122 +533,131 @@ export default function VMDetails() {
                   </div>
                 </div>
               )}
-            {/* Ticket */}
-            {vm.ticket && (
+              {/* Ticket */}
+              {vm.ticket && (
                 <div className="flex items-start space-x-2">
-                    <Ticket className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
-                    <div>
+                  <Ticket className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />
+                  <div>
                     <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                        Ticket:
-                    </span>
-                    <p className="text-slate-800 dark:text-slate-100">{vm.ticket}</p>
-                    </div>
-                </div>
-            )}
-            {/* Final Client */}
-            {vm.finalClientName && (
-                <div className="flex items-start space-x-2">
-                    <Users className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />{" "}
-                    {/* Assuming Users icon from lucide */}
-                    <div>
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                        Cliente Final:
+                      Ticket:
                     </span>
                     <p className="text-slate-800 dark:text-slate-100">
-                        {vm.finalClientName}
+                      {vm.ticket}
                     </p>
-                    </div>
+                  </div>
                 </div>
-            )}
+              )}
+              {/* Final Client */}
+              {vm.finalClientName && (
+                <div className="flex items-start space-x-2">
+                  <Users className="w-5 h-5 text-slate-500 dark:text-slate-400 mt-0.5 flex-shrink-0" />{" "}
+                  {/* Assuming Users icon from lucide */}
+                  <div>
+                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                      Cliente Final:
+                    </span>
+                    <p className="text-slate-800 dark:text-slate-100">
+                      {vm.finalClientName}
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
-       
-        {/* Performance Metrics Section */}
-        {vm.status === "running" && (vm.hypervisorType === 'proxmox' || vm.hypervisorType === 'vsphere') && authToken && (
-          <div className="border-t border-slate-200 dark:border-slate-700 p-6">
-            <h3 className="text-xl font-semibold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
-              <Activity className="w-6 h-6 mr-2 text-primary-600" />
-              Metricas de Rendimiento
-              {metricsLoading && (
-                <div className="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-slate-400"></div>
-              )}
-            </h3>
-            {metrics ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* CPU Usage */}
-                <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Cpu className="w-5 h-5 text-blue-500" />
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      Uso CPU
-                    </span>
-                  </div>
-                  <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                    {metrics.cpu.toFixed(1)}%
-                  </p>
-                </div>
-                {/* Memory Usage */}
-                <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Memory className="w-5 h-5 text-green-500" />
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      Uso Memoria
-                    </span>
-                  </div>
-                  <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                    {metrics.memory.toFixed(1)}%
-                  </p>
-                </div>
-                {/* Network I/O (Total) */}
-                <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Network className="w-5 h-5 text-purple-500" />
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      Network (Total)
-                    </span>
-                  </div>
-                  <p className="text-sm text-slate-700 dark:text-slate-200">
-                    In: {formatBytes(metrics.network.in)}
-                  </p>
-                  <p className="text-sm text-slate-700 dark:text-slate-200">
-                    Out: {formatBytes(metrics.network.out)}
-                  </p>
-                </div>
-                {/* Uptime */}
-                <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
-                  <div className="flex items-center space-x-2 mb-1">
-                    <Clock className="w-5 h-5 text-orange-500" />
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      Uptime
-                    </span>
-                  </div>
-                  <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                    {formatUptime(metrics.uptime)}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              !metricsLoading && (
-                <p className="text-slate-500 dark:text-slate-400">
-                  Metricas no disponibles. Asegúrate de que la VM esté en ejecución y que el agente esté configurado correctamente.
-                </p>
-              )
-            )}
-          </div>
-        )}
- {/* Historical Metrics Section - Only for Proxmox for now */}
- {vm.status === "running" && (vm.hypervisorType === 'proxmox' || vm.hypervisorType === 'vsphere') && authToken && (
-          <VMHistoricalMetrics
-            vmId={vm.id}
-            nodeName={vm.hypervisorType === 'proxmox' ? vm.nodeName : undefined} // Pass nodeName only for Proxmox
-            hypervisorType={vm.hypervisorType}
-            authToken={authToken}
-          />
-        )}
 
+        {/* Performance Metrics Section */}
+        {vm.status === "running" &&
+          (vm.hypervisorType === "proxmox" ||
+            vm.hypervisorType === "vsphere") &&
+          authToken && (
+            <div className="border-t border-slate-200 dark:border-slate-700 p-6">
+              <h3 className="text-xl font-semibold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
+                <Activity className="w-6 h-6 mr-2 text-primary-600" />
+                Metricas de Rendimiento
+                {metricsLoading && (
+                  <div className="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-slate-400"></div>
+                )}
+              </h3>
+              {metrics ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* CPU Usage */}
+                  <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <Cpu className="w-5 h-5 text-blue-500" />
+                      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                        Uso CPU
+                      </span>
+                    </div>
+                    <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+                      {metrics.cpu.toFixed(1)}%
+                    </p>
+                  </div>
+                  {/* Memory Usage */}
+                  <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <Memory className="w-5 h-5 text-green-500" />
+                      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                        Uso Memoria
+                      </span>
+                    </div>
+                    <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+                      {metrics.memory.toFixed(1)}%
+                    </p>
+                  </div>
+                  {/* Network I/O (Total) */}
+                  <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <Network className="w-5 h-5 text-purple-500" />
+                      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                        Network (Total)
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-700 dark:text-slate-200">
+                      In: {formatBytes(metrics.network.in)}
+                    </p>
+                    <p className="text-sm text-slate-700 dark:text-slate-200">
+                      Out: {formatBytes(metrics.network.out)}
+                    </p>
+                  </div>
+                  {/* Uptime */}
+                  <div className="bg-slate-50 dark:bg-slate-700 rounded-lg p-3">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <Clock className="w-5 h-5 text-orange-500" />
+                      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                        Uptime
+                      </span>
+                    </div>
+                    <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+                      {formatUptime(metrics.uptime)}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                !metricsLoading && (
+                  <p className="text-slate-500 dark:text-slate-400">
+                    Metricas no disponibles. Asegúrate de que la VM esté en
+                    ejecución y que el agente esté configurado correctamente.
+                  </p>
+                )
+              )}
+            </div>
+          )}
+        {/* Historical Metrics Section - Only for Proxmox for now */}
+        {vm.status === "running" &&
+          (vm.hypervisorType === "proxmox" ||
+            vm.hypervisorType === "vsphere") &&
+          authToken && (
+            <VMHistoricalMetrics
+              vmId={vm.id}
+              nodeName={
+                vm.hypervisorType === "proxmox" ? vm.nodeName : undefined
+              } // Pass nodeName only for Proxmox
+              hypervisorType={vm.hypervisorType}
+              authToken={authToken}
+            />
+          )}
       </div>
-     
     </div>
   );
 }
