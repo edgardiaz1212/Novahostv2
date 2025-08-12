@@ -90,18 +90,10 @@ export default function VMConsole() {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host; // Usa el host de tu aplicación
 
-      // Pasamos los detalles de la consola de Proxmox como parámetros para que el backend sepa a dónde conectarse.
-      const proxmoxConsoleUrl = `/api2/json/nodes/${consoleData.node}/qemu/${consoleData.vmid}/vncwebsocket?port=${consoleData.port}&vncticket=${encodeURIComponent(consoleData.ticket)}`;
-      const websocketUrl = `${proto}//${host}/api/vms/${vmId}/console-ws?proxmox_host=${consoleData.host}&proxmox_port=${consoleData.port}&proxmox_path=${encodeURIComponent(proxmoxConsoleUrl)}`;
-        //EDD!! revisar esta direccion si es correcta   
-      
-      
-      
-      
-      
-      
-      
-        // Configurar cliente RFB (VNC)
+// Pasamos solo la información necesaria para que el backend pueda solicitar un nuevo ticket.
+const websocketUrl = `${proto}//${host}/api/vms/${vmId}/console-ws?proxmox_host=${consoleData.host}&proxmox_node=${consoleData.node}&proxmox_vmid=${consoleData.vmid}&proxmox_vnc_port=${consoleData.port}`;
+
+// Configurar cliente RFB (VNC)
       rfbRef.current = new RFB(screenRef.current, websocketUrl, {
         credentials: {
           password: consoleData.ticket,

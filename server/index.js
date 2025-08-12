@@ -7,11 +7,12 @@ import Proxmox, { proxmoxApi } from 'proxmox-api';
 import bcrypt from 'bcrypt';
 import { constants as cryptoConstants } from 'crypto';
 import jwt from 'jsonwebtoken';
+import http from 'http'; // Para crear el servidor HTTP
+import url from 'url';    // Para parsear URLs
+import WebSocket from 'ws'; // Cliente WebSocket
+
 // import fetch from 'node-fetch'; // Asegúrate de tener node-fetch si usas Node < 18 o si fetch no está global
 
-import http from 'http'; // o https si tu servidor Express ya usa HTTPS
-
-import { URL } from 'url';
 
 dotenv.config();
 
@@ -1086,7 +1087,7 @@ app.get('/api/vms/:id', authenticate, async (req, res) => {
           },
         tags: vmConfig.tags ? vmConfig.tags.split(';') : [],
       };
-      console.log('detalles',hypervisorData)
+  
 
         vmFoundOnHypervisor = true; // Found on this hypervisor
         break; // Stop searching
@@ -2840,28 +2841,20 @@ app.get('/api/vms/:id/console', authenticate, async (req, res) => {
         websocket: 1, // Solicitar conexión WebSocket
         
     });
-console.log("websocket:", consoleData);
-    // b) Construir la URL de acceso a noVNC
-const hypervisorHost = targetHypervisor.host.includes(':') ? targetHypervisor.host.split(':')[0] : targetHypervisor.host;
-const hypervisorPort = targetHypervisor.host.includes(':') ? targetHypervisor.host.split(':')[1] : '8006';
 
-// La URL base para noVNC en el hypervisor
-// NOTA: Asegúrate de que esta ruta es correcta en tu instalación de Proxmox
-// Puede ser /novnc/, /vnc/ o incluso una URL externa configurada por ti.
-const novncBaseUrl = `https://${hypervisorHost}:${hypervisorPort}`;
-console.log("conectando a noVNC en:", novncBaseUrl);
-// La URL completa para noVNC
-const consoleUrl = `${novncBaseUrl}/?console=kvm&novnc=1&node=${targetNode}&vmid=${vmid}&vmname=VM-${vmid}&ticket=${consoleData.ticket}`;    // --- Paso 4: Devolver la información ---
+ // --- Paso 4: Devolver la información ---
+    // Ya no generamos la URL completa de noVNC aquí, ya que el frontend usará el proxy.
+    // Solo devolvemos los datos necesarios para el proxy WebSocket.
     res.json({
-      type: "vnc", // Tipo de consola
-      url: consoleUrl, // URL completa para iframe o redirección
-      ticket: consoleData.ticket, // Ticket generado
-      port: consoleData.port, // Puerto WebSocket (si aplica)
-      host: hypervisorHost, // IP del hypervisor
+      type: "vnc",
+      // url: consoleUrl, // Opcional: si aún quieres permitir abrir en nueva pestaña
+      ticket: consoleData.ticket, // Ticket generado (el bueno)
+      port: consoleData.port, // Puerto VNC (por ejemplo, 5900, 5901)
+      host: targetHypervisor.host.includes(':') ? targetHypervisor.host.split(':')[0] : targetHypervisor.host, // IP del hypervisor
       node: targetNode, // Nodo donde corre la VM
       vmid: vmid // ID de la VM
     });
-    console.log("conectado a",consoleUrl);
+  
 
   } catch (error) {
     console.error(`Error fetching console details for VM ${vmid}:`, error);
@@ -2879,7 +2872,248 @@ const consoleUrl = `${novncBaseUrl}/?console=kvm&novnc=1&node=${targetNode}&vmid
 // --- Servidor HTTP para Express y WebSocket ---
 const server = http.createServer(app);
 
+// --- Proxy WebSocket para Consola de VMs ---
+server.on('upgrade', (request, socket, head) => {
+  // 1. Parsear la URL de la solicitud para ver si es para '/api/vms/:id/console-ws'
+  const parsedUrl = url.parse(request.url, true); // true para parsear query string
+  const pathname = parsedUrl.pathname;
 
+  // Expresión regular para coincidir con la ruta /api/vms/:id/console-ws
+  const consoleWsRegex = /^\/api\/vms\/([^\/]+)\/console-ws$/;
+
+  const match = pathname.match(consoleWsRegex);
+
+  if (match) {
+    const vmId = match[1]; // El ID de la VM capturado por la regex
+    const queryParams = parsedUrl.query; // { proxmox_host, proxmox_node, proxmox_vmid, proxmox_vnc_port }
+
+    console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Params:`, queryParams);
+
+    // --- IIFE Async para manejar la lógica asíncrona ---
+    (async () => {
+      // 2. Validar parámetros requeridos
+      if (!queryParams.proxmox_host || !queryParams.proxmox_node || !queryParams.proxmox_vmid || !queryParams.proxmox_vnc_port) {
+        console.error(`- WS UPGRADE /api/vms/${vmId}/console-ws - Faltan parámetros requeridos`);
+        // Corregido: \r\n\r\n en lugar de \r\r
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\nFaltan parámetros requeridos: proxmox_host, proxmox_node, proxmox_vmid, proxmox_vnc_port');
+        socket.destroy();
+        return;
+      }
+
+      // 3. Extraer y preparar parámetros
+      const proxmoxHost = queryParams.proxmox_host;
+      const proxmoxNode = queryParams.proxmox_node;
+      const proxmoxVmId = queryParams.proxmox_vmid;
+      const proxmoxVncPort = queryParams.proxmox_vnc_port;
+      // El ticket se generará más adelante
+
+      // 4. Obtener credenciales del Hypervisor
+      let hypervisorCredentials = null;
+      try {
+        // Buscar el hypervisor en la BD usando el host
+        const { rows: [hypervisor] } = await pool.query(
+          `SELECT id, type, host, username, api_token, token_name
+           FROM hypervisors 
+           WHERE status = 'connected' AND type = 'proxmox' AND (host = $1 OR host LIKE $2)`,
+          [proxmoxHost, `${proxmoxHost}:%`] // Busca host exacto o host:puerto
+        );
+        
+        if (!hypervisor) {
+          throw new Error(`Hypervisor Proxmox con host ${proxmoxHost} no encontrado o no conectado.`);
+        }
+        
+        hypervisorCredentials = {
+          host: hypervisor.host,
+          username: hypervisor.username,
+          api_token: hypervisor.api_token,
+          token_name: hypervisor.token_name
+        };
+;
+      } catch (dbError) {
+        console.error(`- WS UPGRADE /api/vms/${vmId}/console-ws - Error obteniendo credenciales del hypervisor ${proxmoxHost}:`, dbError.message);
+        // Corregido: \r\n\r\n
+        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\nError obteniendo credenciales del hypervisor.');
+        socket.destroy();
+        return;
+      }
+      
+      // 5. Crear cliente Proxmox con las credenciales obtenidas
+      let proxmoxClientForTicket = null;
+      try {
+        const [dbHost, dbPortStr] = hypervisorCredentials.host.split(':');
+        const port = dbPortStr ? parseInt(dbPortStr, 10) : 8006;
+        const cleanHost = dbHost;
+
+        const proxmoxConfig = {
+          host: cleanHost,
+          port: port,
+          username: hypervisorCredentials.username,
+          // Corrección: El formato del tokenID es USUARIO@REALM!NOMBRE_TOKEN
+          tokenID: `${hypervisorCredentials.username}!${hypervisorCredentials.token_name}`, // Ajusta el realm si es diferente
+          tokenSecret: hypervisorCredentials.api_token,
+          timeout: 10000,
+          rejectUnauthorized: false // Para certificados autofirmados
+        };
+        console.log('- WS UPGRADE /api/vms/${vmId}/console-ws - Creando cliente Proxmox con configuración:', proxmoxConfig);
+        proxmoxClientForTicket = proxmoxApi(proxmoxConfig);
+        
+      } catch (clientError) {
+         console.error(`- WS UPGRADE /api/vms/${vmId}/console-ws - Error creando cliente Proxmox:`, clientError.message);
+         // Corregido: \r\n\r\n
+         socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\nError configurando conexión al hypervisor.');
+         socket.destroy();
+         return;
+      }
+      
+      // 6. Solicitar un NUEVO ticket de VNC
+      let freshConsoleData = null;
+      try {
+        console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Solicitando nuevo ticket VNC para VM ${proxmoxVmId} en nodo ${proxmoxNode}`);
+        freshConsoleData = await proxmoxClientForTicket.nodes.$(proxmoxNode).qemu.$(proxmoxVmId).vncproxy.$post({
+          websocket: 1 // Solicitar conexión WebSocket - Esto genera el ticket
+        });
+        console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Nuevo ticket VNC obtenido.`); // Evita loggear el ticket completo
+
+      } catch (ticketError) {
+        console.error(`- WS UPGRADE /api/vms/${vmId}/console-ws - Error obteniendo nuevo ticket VNC:`, ticketError.message);
+        const errorDetails = getProxmoxError(ticketError); // Reutiliza tu helper
+        // CORREGIDO: \r\r -> \r\n\r\n
+        socket.write(`HTTP/1.1 ${errorDetails.code || 500} Internal Server Error\r\n\r\nError obteniendo ticket de consola: ${errorDetails.message}`);
+        socket.destroy();
+        return; // Salimos de la IIFE
+      }
+      
+      // 7. Construir la URL del WebSocket de Proxmox con el NUEVO ticket
+         // --- Construir la URL del WebSocket de Proxmox ---
+         const targetWsProtocol = 'wss';
+         const targetWsPort = '8006';
+         const vncWebsocketPath = `/api2/json/nodes/${proxmoxNode}/qemu/${proxmoxVmId}/vncwebsocket`;
+         
+         // --- PRUEBA 3: Pasar el ticket como parámetro de consulta ---
+         // Descomenta esta línea y comenta la de abajo para probar esta variación
+          const targetWsUrl = `${targetWsProtocol}://${proxmoxHost}:${targetWsPort}${vncWebsocketPath}?port=${encodeURIComponent(proxmoxVncPort)}&vncticket=${encodeURIComponent(freshConsoleData.ticket)}`;
+         
+         // --- PRUEBA 1 & 2 (por defecto): Pasar ticket en header, puerto en header, y probar subprotocolo ---
+         // Comenta esta línea si usas la de arriba
+         //const targetWsUrl = `${targetWsProtocol}://${proxmoxHost}:${targetWsPort}${vncWebsocketPath}`;
+         
+         const websocketOptions = {
+           rejectUnauthorized: false,
+          //  headers: {
+          //    // Proxmox espera este header para la autenticación del WebSocket VNC
+          //    'Authorization': `PVEVNC ${freshConsoleData.ticket}`,
+          //    // --- PRUEBA 1: Comentar esta línea para probar sin X-VPX-Port ---
+          //    // El puerto VNC también se puede pasar por header
+          //    //'X-VPX-Port': proxmoxVncPort 
+          //  },
+           // --- PRUEBA 2: Descomentar esta línea para probar con subprotocolo ---
+            subprotocols: ['binary']
+         };
+
+      console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Conectando a Proxmox WebSocket (usando ticket en header): ${targetWsUrl} (ticket oculto)`);
+
+
+
+      // 8. Crear cliente WebSocket para conectarse a Proxmox
+      // Opción 1: Simple (como antes)
+      const proxmoxWs = new WebSocket(targetWsUrl, {
+          rejectUnauthorized: false // IMPORTANTE: Ajusta según tus certificados.
+      });
+
+      // Opción 2: Con Agent (si la Opción 1 sigue fallando)
+      /*
+      const httpsAgent = new https.Agent({
+        rejectUnauthorized: false, // Solo para diagnóstico
+      });
+      const proxmoxWs = new WebSocket(targetWsUrl, {
+        agent: httpsAgent
+      });
+      */
+      
+      // 9. Manejar errores en la conexión al WebSocket de Proxmox
+      proxmoxWs.on('error', (err) => {
+        console.error(`- WS UPGRADE /api/vms/${vmId}/console-ws - Error conectando a Proxmox WebSocket:`, err.message);
+        // Corregido: \r\n\r\n
+        socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\nError conectando al servidor de consola');
+        socket.destroy();
+      });
+
+      // 10. Esperar a que la conexión al WebSocket de Proxmox se establezca
+      proxmoxWs.on('open', () => {
+        console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Conectado a Proxmox WebSocket`);
+
+        // 11. Solo después de conectarse a Proxmox, aceptamos la solicitud de upgrade del cliente
+        // Crear una instancia reutilizable del servidor WS sin asociarla automáticamente al HTTP server
+        const wss = new WebSocket.Server({ noServer: true });
+
+        // 12. Manejar la conexión del cliente frontend una vez aceptada
+        wss.on('connection', (frontendWs, request) => {
+            console.log(`- WS /api/vms/${vmId}/console-ws - Cliente conectado`);
+
+            // --- De Cliente Frontend a Proxmox ---
+            frontendWs.on('message', (data) => {
+                // console.log(`[Cliente->Proxmox] VM ${vmId} - Mensaje (bytes):`, data?.length || 0); // Muy verbose
+                if (proxmoxWs.readyState === WebSocket.OPEN) {
+                    proxmoxWs.send(data);
+                }
+            });
+
+            frontendWs.on('close', (code, reason) => {
+                console.log(`- WS /api/vms/${vmId}/console-ws - Cliente desconectado. Código: ${code}, Razón:`, reason?.toString());
+                if (proxmoxWs.readyState === WebSocket.OPEN || proxmoxWs.readyState === WebSocket.CONNECTING) {
+                    proxmoxWs.close(); // Cerrar también la conexión a Proxmox
+                }
+            });
+
+            frontendWs.on('error', (err) => {
+                 console.error(`- WS /api/vms/${vmId}/console-ws - Error en conexión cliente:`, err.message);
+                 // La conexión se cerrará automáticamente por el servidor WS
+            });
+
+            // --- De Proxmox a Cliente Frontend ---
+            proxmoxWs.on('message', (data) => {
+                // console.log(`[Proxmox->Cliente] VM ${vmId} - Mensaje (bytes):`, data?.length || 0); // Muy verbose
+                if (frontendWs.readyState === WebSocket.OPEN) {
+                    frontendWs.send(data);
+                }
+            });
+
+            proxmoxWs.on('close', (code, reason) => {
+                console.log(`- WS /api/vms/${vmId}/console-ws - Proxmox WebSocket cerrado. Código: ${code}, Razón:`, reason?.toString());
+                if (frontendWs.readyState === WebSocket.OPEN || frontendWs.readyState === WebSocket.CONNECTING) {
+                     // 1011: Internal Error - El servidor encontró una condición inesperada
+                    frontendWs.close(1011, 'Conexión al servidor de consola cerrada');
+                }
+            });
+
+        });
+
+        // 13. Ahora, usa la MISMA instancia `wss` para manejar el upgrade e iniciar la conexión
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            // Y emite el evento 'connection' en la misma instancia `wss`
+            wss.emit('connection', ws, request);
+        });
+
+      });
+
+    })().catch(err => {
+      // Capturar cualquier error no manejado dentro de la IIFE async
+      console.error('- WS UPGRADE - Error no capturado en manejador async:', err);
+      // Si el socket aún no se ha destruido, intenta enviar un error genérico
+      if (socket.writable) {
+        // Corregido: \r\n\r\n
+        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\nInternal server error during WebSocket upgrade.');
+        socket.destroy();
+      }
+    });
+    // --- Fin IIFE Async ---
+  } else {
+    // Si la ruta no coincide, dejamos que Express maneje otras solicitudes de upgrade (si las hubiera)
+    // o simplemente las ignoramos.
+    // console.log(`- WS UPGRADE - Ruta no manejada: ${pathname}`);
+  }
+});
+// --- Fin Proxy WebSocket ---
 
 
 server.listen(port, () => {
