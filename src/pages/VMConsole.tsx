@@ -16,8 +16,7 @@ export default function VMConsole() {
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
 
-
-  console.log(authToken)
+ 
   useEffect(() => {
     // 1. Esperar a que el hook de autenticación termine de cargar.
     if (authLoading) {

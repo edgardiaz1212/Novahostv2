@@ -44,8 +44,8 @@ function App() {
           <Route
             path="/create-vm"
             element={
-              <ProtectedRoute> {/* Ensures user is authenticated */}
-                {/* Additional check for role */}
+              <ProtectedRoute>
+                
                 {(user?.role === 'admin' || user?.role === 'user') ? (
                   <CreateVM />
                 ) : (
@@ -76,8 +76,7 @@ function App() {
           <Route
             path="/settings"
             element={
-              <ProtectedRoute> {/* Ensures user is authenticated */}
-                {/* Additional check for role */}
+              <ProtectedRoute> 
                 {(user?.role === 'admin' || user?.role === 'user') ? (
                   <Settings />
                 ) : (

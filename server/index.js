@@ -2984,35 +2984,26 @@ server.on('upgrade', (request, socket, head) => {
       }
       
       // 7. Construir la URL del WebSocket de Proxmox con el NUEVO ticket
-         // --- Construir la URL del WebSocket de Proxmox ---
-         const targetWsProtocol = 'wss';
-         const targetWsPort = '8006';
-         const vncWebsocketPath = `/api2/json/nodes/${proxmoxNode}/qemu/${proxmoxVmId}/vncwebsocket`;
-         
-         // --- PRUEBA 3: Pasar el ticket como parámetro de consulta ---
-         // Descomenta esta línea y comenta la de abajo para probar esta variación
-          const targetWsUrl = `${targetWsProtocol}://${proxmoxHost}:${targetWsPort}${vncWebsocketPath}?port=${encodeURIComponent(proxmoxVncPort)}&vncticket=${encodeURIComponent(freshConsoleData.ticket)}`;
-         
-         // --- PRUEBA 1 & 2 (por defecto): Pasar ticket en header, puerto en header, y probar subprotocolo ---
-         // Comenta esta línea si usas la de arriba
-         //const targetWsUrl = `${targetWsProtocol}://${proxmoxHost}:${targetWsPort}${vncWebsocketPath}`;
-         
-         const websocketOptions = {
-           rejectUnauthorized: false,
-          //  headers: {
-          //    // Proxmox espera este header para la autenticación del WebSocket VNC
-          //    'Authorization': `PVEVNC ${freshConsoleData.ticket}`,
-          //    // --- PRUEBA 1: Comentar esta línea para probar sin X-VPX-Port ---
-          //    // El puerto VNC también se puede pasar por header
-          //    //'X-VPX-Port': proxmoxVncPort 
-          //  },
-           // --- PRUEBA 2: Descomentar esta línea para probar con subprotocolo ---
-            subprotocols: ['binary']
-         };
+         // --- Construir la URL del WebSocket de Proxmox (FORMA CORRECTA PARA /vncwebsocket) ---
+      const targetWsProtocol = 'wss';
+      const targetWsPort = '8006';
+      const vncWebsocketPath = `/api2/json/nodes/${proxmoxNode}/qemu/${proxmoxVmId}/vncwebsocket`;
+      
+      // Pasar el puerto y el ticket SOLO como parámetros de consulta.
+      // Esta es la forma estándar esperada por el endpoint de Proxmox para vncwebsocket.
+      const targetWsUrl = `${targetWsProtocol}://${proxmoxHost}:${targetWsPort}${vncWebsocketPath}?port=${encodeURIComponent(proxmoxVncPort)}&vncticket=${encodeURIComponent(freshConsoleData.ticket)}`;
+      
+      // Opciones para el cliente WebSocket
+      const websocketOptions = {
+        rejectUnauthorized: false // IMPORTANTE: Ajusta según tus certificados.
+        // NO se necesitan headers especiales de autenticación para esta URL,
+        // ya que el ticket está en la URL misma.
+        // subprotocols: ['binary'] // Opcional, se puede probar si hay problemas de datos.
+      };
 
       console.log(`- WS UPGRADE /api/vms/${vmId}/console-ws - Conectando a Proxmox WebSocket (usando ticket en header): ${targetWsUrl} (ticket oculto)`);
 
-
+      
 
       // 8. Crear cliente WebSocket para conectarse a Proxmox
       // Opción 1: Simple (como antes)
